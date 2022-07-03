@@ -10,6 +10,14 @@
 #include "Kismet/KismetMathLibrary.h"
 #include "Animation/AnimInstance.h"
 #include "Kismet/GameplayStatics.h"
+#include "Components/InputComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Camera/CameraComponent.h"
+#include "GameFramework/Controller.h"
+#include "GameFramework/GameUserSettings.h"
+#include "GameFramework/InputSettings.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "Kismet/GameplayStatics.h"
 
 static FName NAME_PBCharacterCollisionProfile_Capsule(TEXT("PBPawnCapsule"));
 static FName NAME_PBCCharacterCollisionProfile_Mesh(TEXT("PBPawnMesh"));
@@ -24,41 +32,26 @@ APBPlayerCharacter::APBPlayerCharacter(const FObjectInitializer& ObjectInitializ
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UPBPlayerMovement>(ACharacter::CharacterMovementComponentName))
 {
 	PrimaryActorTick.bCanEverTick = true;
-	PrimaryActorTick.bStartWithTickEnabled = false;
 
-	NetCullDistanceSquared = 900000000.0f;
+	SpringArmComponent = CreateDefaultSubobject<USpringArmComponent>(FName("SpringArmComponent"));
+	SpringArmComponent->TargetArmLength = 0.0f;
+	SpringArmComponent->SetupAttachment(GetMesh());
 
-	Mesh1P = ObjectInitializer.CreateDefaultSubobject<USkeletalMeshComponent>(this, TEXT("PawnMesh1P"));
-	Mesh1P->SetupAttachment(GetCapsuleComponent());
-	Mesh1P->bOnlyOwnerSee = true;
-	Mesh1P->bOwnerNoSee = false;
-	Mesh1P->bCastDynamicShadow = false;
-	Mesh1P->bReceivesDecals = false;
-	Mesh1P->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
-	Mesh1P->PrimaryComponentTick.TickGroup = TG_PrePhysics;
-	Mesh1P->SetCollisionObjectType(ECC_Pawn);
-	Mesh1P->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	Mesh1P->SetCollisionResponseToAllChannels(ECR_Ignore);
+	CameraComponent = CreateDefaultSubobject<UCameraComponent>(FName("CameraComponent"));
+	CameraComponent->SetRelativeLocation(FVector(0.0f, 0.0f, 70.0f));
+	CameraComponent->bUsePawnControlRotation = true;
+	CameraComponent->SetupAttachment(SpringArmComponent);
 
 
-	GetMesh()->bReceivesDecals = false;
-	GetMesh()->SetCollisionObjectType(ECC_Pawn);
-	GetMesh()->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	GetMesh()->SetCollisionObjectType(ECC_PhysicsBody);  // Can't be of type 'pawn' or capsule
-	GetMesh()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
-	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Camera, ECR_Ignore);
+	FirstPersonArms = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonArms"));
+	FirstPersonArms->SetRelativeRotation(FRotator(0, -90, 0));
+	CameraComponent->SetupAttachment(CameraComponent);
 
-	bCrouching = false;
-	BaseMovementSpeed = 650.f;
-	CrouchMovementSpeed = 300.f;
-	StandingCapsuleHalfHeight = 88.f;
-	CrouchingCapsuleHalfHeight = 44.f;
+	// Other settings
+	GetCapsuleComponent()->bReturnMaterialOnMove = true;
+
 	BaseGroundFriction = 2.f;
 	CrouchingGroundFriction = 100.f;
-
-	// set our turn rates for input
-	BaseTurnRate = 45.0f;
-	BaseLookUpRate = 45.0f;
 
 	// get pointer to movement component
 	MovementPtr = Cast<UPBPlayerMovement>(ACharacter::GetMovementComponent());
@@ -72,6 +65,8 @@ APBPlayerCharacter::APBPlayerCharacter(const FObjectInitializer& ObjectInitializ
 	GetCharacterMovement()->bOrientRotationToMovement = false; // Character moves in the direction of input...
 	GetCharacterMovement()->RotationRate = FRotator(0.f, 540.f, 0.f); // ...at this rotation rate
 
+	bCanUnCrouch = true;
+
 	/*Net Settings*/
 //NetUpdateFrequency = 128.0f;
 //MinNetUpdateFrequency = 32.0f;
@@ -83,64 +78,181 @@ void APBPlayerCharacter::BeginPlay()
 	Super::BeginPlay();
 	// Max jump time to get to the top of the arc
 	MaxJumpTime = -4.0f * GetCharacterMovement()->JumpZVelocity / (3.0f * GetCharacterMovement()->GetGravityZ());
+
+	APlayerCameraManager* CameraManager = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	if (CameraManager)
+	{
+		CameraManager->ViewPitchMin = Camera.MinPitch;
+		CameraManager->ViewPitchMax = Camera.MaxPitch;
+	}
+
+	// Initialization
+	OriginalCameraLocation = CameraComponent->GetRelativeLocation();
+	OriginalCapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	bCanUnCrouch = true;
+
+	// Footstep setup
+	LastLocation = GetActorLocation();
+	LastFootstepLocation = GetActorLocation();
+	TravelDistance = 0;
+
+
 }
 
-void APBPlayerCharacter::InterpCapsuleHalfHeight(float DeltaTime)
+void APBPlayerCharacter::Tick(const float DeltaTime)
 {
-	float TargetCapsuleHalfHeight{};
-	if (bCrouching)
+	Super::Tick(DeltaTime);
+	UpdateCrouch(DeltaTime);
+}
+
+
+void APBPlayerCharacter::StartCrouch()
+{
+	if (GetCharacterMovement()->IsMovingOnGround() && bCanUnCrouch)
 	{
-		TargetCapsuleHalfHeight = CrouchingCapsuleHalfHeight;
+		bIsCrouching = !bIsCrouching;
+
+		GetCharacterMovement()->MaxWalkSpeed = bIsCrouching ? Movement.CrouchSpeed : Movement.WalkSpeed;
+	}
+}
+void APBPlayerCharacter::StopCrouching()
+{
+	// Reset stance when crouch is not in toggle mode
+	if (!Movement.bToggleToCrouch && bCanUnCrouch)
+	{
+		GetCharacterMovement()->MaxWalkSpeed = Movement.WalkSpeed;
+
+		bIsCrouching = false;
+	}
+}
+
+void APBPlayerCharacter::MoveForward(const float AxisValue)
+{
+	if (Controller)
+	{
+		FRotator ForwardRotation = Controller->GetControlRotation();
+
+		// Limit pitch rotation
+		if (GetCharacterMovement()->IsMovingOnGround() || GetCharacterMovement()->IsFalling())
+			ForwardRotation.Pitch = 0.0f;
+
+		// Find out which way is forward
+		const FVector Direction = FRotationMatrix(ForwardRotation).GetScaledAxis(EAxis::X);
+
+		// Apply movement in the calculated direction
+		AddMovementInput(Direction, AxisValue);
+
+		}
+}
+
+void APBPlayerCharacter::MoveRight(const float AxisValue)
+{
+	if (Controller)
+	{
+		// Find out which way is right
+		const FRotator RightRotation = Controller->GetControlRotation();
+		const FVector Direction = FRotationMatrix(RightRotation).GetScaledAxis(EAxis::Y);
+
+		// Apply movement in the calculated direction
+		AddMovementInput(Direction, AxisValue);
+	}
+}
+
+void APBPlayerCharacter::Run()
+{
+	if (!bIsCrouching)
+	{
+		GetCharacterMovement()->MaxWalkSpeed = Movement.RunSpeed;
+
+		bIsRunning = true;
+	}
+}
+
+void APBPlayerCharacter::StopRunning()
+{
+	if (!bIsCrouching)
+	{
+		GetCharacterMovement()->MaxWalkSpeed = Movement.WalkSpeed;
+
+		bIsRunning = false;
+	}
+}
+
+void APBPlayerCharacter::UpdateCrouch(const float DeltaTime)
+{
+	if (bIsCrouching)
+	{
+		// Smoothly move camera to target location and smoothly decrease the capsule height to fit through small openings
+		const FVector NewLocation = FMath::Lerp(CameraComponent->GetRelativeLocation(), FVector(0.0f, 0.0f, 30.0f), Movement.StandToCrouchTransitionSpeed * DeltaTime);
+		const float NewHalfHeight = FMath::Lerp(GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight(), OriginalCapsuleHalfHeight / 2.0f, Movement.StandToCrouchTransitionSpeed * DeltaTime);
+
+		CameraComponent->SetRelativeLocation(NewLocation);
+		GetCapsuleComponent()->SetCapsuleHalfHeight(NewHalfHeight);
+
+		if (IsBlockedInCrouchStance())
+			bCanUnCrouch = false;
+		else
+			bCanUnCrouch = true;
 	}
 	else
 	{
-		TargetCapsuleHalfHeight = StandingCapsuleHalfHeight;
-	}
-	const float InterpHalfHeight{ FMath::FInterpTo(GetCapsuleComponent()->GetScaledCapsuleHalfHeight(), TargetCapsuleHalfHeight, DeltaTime, 20.f) };
+		// Smoothly move camera back to original location and smoothly increase the capsule height to the original height
+		const FVector NewLocation = FMath::Lerp(CameraComponent->GetRelativeLocation(), OriginalCameraLocation, Movement.StandToCrouchTransitionSpeed * DeltaTime);
+		const float NewHalfHeight = FMath::Lerp(GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight(), OriginalCapsuleHalfHeight, Movement.StandToCrouchTransitionSpeed * DeltaTime);
 
-	// Negative value if crouching; Positive value if standing
-	const float DeltaCapsuleHalfHeight{ InterpHalfHeight - GetCapsuleComponent()->GetScaledCapsuleHalfHeight() };
-	const FVector MeshOffset{ 0.f, 0.f, -DeltaCapsuleHalfHeight };
-	GetMesh()->AddLocalOffset(MeshOffset);
-
-	GetCapsuleComponent()->SetCapsuleHalfHeight(InterpHalfHeight);
-}
-
-void APBPlayerCharacter::OnRep_IsSprinting()
-{
-	UPBPlayerMovement* MovementComponent = Cast<UPBPlayerMovement>(GetCharacterMovement());
-	{
-
-		MovementComponent->bNetworkUpdateReceived = true;
+		CameraComponent->SetRelativeLocation(NewLocation);
+		GetCapsuleComponent()->SetCapsuleHalfHeight(NewHalfHeight);
 	}
 }
 
-void APBPlayerCharacter::StopSprinting()
+bool APBPlayerCharacter::IsBlockedInCrouchStance()
 {
-	bIsSprinting = false;
+	// Raycast up above character
+	FHitResult HitResult;
+	const FVector RayLength = FVector(0.0f, 0.0f, 130.0f);
+
+	return GetWorld()->LineTraceSingleByChannel(HitResult, GetActorLocation(), GetActorLocation() + RayLength, ECC_Visibility);
 }
 
-void APBPlayerCharacter::Sprint()
+void APBPlayerCharacter::AddControllerYawInput(const float Value)
 {
-	bIsSprinting = true;
+	return Super::AddControllerYawInput(Value * Camera.SensitivityX * GetWorld()->GetDeltaSeconds());
 }
 
-void APBPlayerCharacter::OnRep_IsCrouched()
+void APBPlayerCharacter::AddControllerPitchInput(const float Value)
 {
-	UPBPlayerMovement* MovementComponent = Cast<UPBPlayerMovement>(GetCharacterMovement());
-	if (MovementComponent)
-	{
-		if (bIsCrouched)
-		{
-			MovementComponent->bWantsToCrouch = true;
-		}
-		else
-		{
-			MovementComponent->bWantsToCrouch = false;
-		}
-		MovementComponent->bNetworkUpdateReceived = true;
-	}
+	Super::AddControllerPitchInput(Value * Camera.SensitivityY * GetWorld()->GetDeltaSeconds());
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 void APBPlayerCharacter::ClearJumpInput(float DeltaTime)
@@ -186,24 +298,6 @@ void APBPlayerCharacter::StopJumping()
 	if (GetCharacterMovement()->bCheatFlying)
 	{
 		Cast<UPBPlayerMovement>(GetMovementComponent())->NoClipVerticalMoveMode = 0;
-	}
-}
-
-void APBPlayerCharacter::CrouchButtonPressed()
-{
-	if (!GetCharacterMovement()->IsFalling())
-	{
-		bCrouching = !bCrouching;
-	}
-	if (bCrouching)
-	{
-		GetCharacterMovement()->MaxWalkSpeed = CrouchMovementSpeed;
-		GetCharacterMovement()->GroundFriction = CrouchingGroundFriction;
-	}
-	else
-	{
-		GetCharacterMovement()->MaxWalkSpeed = BaseMovementSpeed;
-		GetCharacterMovement()->GroundFriction = BaseGroundFriction;
 	}
 }
 
@@ -297,7 +391,7 @@ bool APBPlayerCharacter::CanJumpInternal_Implementation() const
 			// C) The jump limit has been met AND we were already jumping
 			const bool bJumpKeyHeld = (bPressedJump && JumpKeyHoldTime < GetJumpMaxHoldTime());
 			bCanJump = bJumpKeyHeld &&
-					   (GetCharacterMovement()->IsMovingOnGround() || (JumpCurrentCount < JumpMaxCount) || (bWasJumping && JumpCurrentCount == JumpMaxCount));
+				(GetCharacterMovement()->IsMovingOnGround() || (JumpCurrentCount < JumpMaxCount) || (bWasJumping && JumpCurrentCount == JumpMaxCount));
 		}
 		if (GetCharacterMovement()->IsMovingOnGround())
 		{
@@ -308,37 +402,6 @@ bool APBPlayerCharacter::CanJumpInternal_Implementation() const
 	}
 
 	return bCanJump;
-}
-
-void APBPlayerCharacter::Move(FVector Direction, float Value)
-{
-	if (!FMath::IsNearlyZero(Value))
-	{
-		// add movement in that direction
-		AddMovementInput(Direction, Value);
-	}
-}
-
-void APBPlayerCharacter::Turn(bool bIsPure, float Rate)
-{
-	if (!bIsPure)
-	{
-		Rate = Rate * BaseTurnRate * GetWorld()->GetDeltaSeconds();
-	}
-
-	// calculate delta for this frame from the rate information
-	AddControllerYawInput(Rate);
-}
-
-void APBPlayerCharacter::LookUp(bool bIsPure, float Rate)
-{
-	if (!bIsPure)
-	{
-		Rate = Rate * BaseLookUpRate * GetWorld()->GetDeltaSeconds();
-	}
-
-	// calculate delta for this frame from the rate information
-	AddControllerPitchInput(Rate);
 }
 
 void APBPlayerCharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent const& DamageEvent, APawn* PawnInstigator, AActor* DamageCauser)
@@ -371,9 +434,4 @@ void APBPlayerCharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent con
 
 		GetCharacterMovement()->AddImpulse(Impulse, bMassIndependentImpulse);
 	}
-}
-
-bool APBPlayerCharacter::CanCrouch() const
-{
-	return Super::CanCrouch() || GetCharacterMovement()->bCheatFlying;
 }

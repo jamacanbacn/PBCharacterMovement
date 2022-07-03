@@ -796,50 +796,6 @@ void UPBPlayerMovement::OnMovementModeChanged(EMovementMode PreviousMovementMode
 			TraceParams);
 		bJumped = true;
 	}
-	if (PreviousMovementMode == EMovementMode::MOVE_Falling && MovementMode == EMovementMode::MOVE_Walking)
-	{
-		Hit = CurrentFloor.HitResult;
-	}
-
-	UPBMoveStepSound* MoveSound = nullptr;
-	TSubclassOf<UPBMoveStepSound>* GotSound = nullptr;
-	if (Hit.PhysMaterial.IsValid())
-	{
-		GotSound = PBCharacter->GetMoveStepSound(Hit.PhysMaterial->SurfaceType);
-	}
-	if (GotSound)
-	{
-		MoveSound = GotSound->GetDefaultObject();
-	}
-	if (!MoveSound)
-	{
-		if (!PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default)))
-		{
-			return;
-		}
-		MoveSound = PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default))->GetDefaultObject();
-	}
-
-	if (MoveSound)
-	{
-		float MoveSoundVolume = MoveSound->GetWalkVolume();
-
-		TArray<USoundCue*> MoveSoundCues = bJumped ? MoveSound->GetJumpSounds() : MoveSound->GetLandSounds();
-
-		if (MoveSoundCues.Num() < 1)
-		{
-			return;
-		}
-
-		USoundCue* Sound = MoveSoundCues[FMath::RandRange(0, MoveSoundCues.Num() - 1)];
-
-		Sound->VolumeMultiplier = MoveSoundVolume;
-
-		/*UPBGameplayStatics::PlaySound(Sound, GetCharacterOwner(),
-									  // FVector(0.0f, 0.0f, -GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()),
-									  EPBSoundCategory::Footstep);*/
-		UGameplayStatics::SpawnSoundAttached(Sound, GetCharacterOwner()->GetRootComponent());
-	}
 }
 
 void UPBPlayerMovement::ToggleNoClip()
