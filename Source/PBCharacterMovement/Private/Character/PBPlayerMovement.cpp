@@ -466,7 +466,7 @@ bool UPBPlayerMovement::CanStepUp(const FHitResult& Hit) const
 	if (IsFalling())
 	{
 		FHitResult HitResult = FHitResult(ForceInit);
-		FVector Start = GetCharacterOwner()->GetMesh()->GetComponentLocation() -
+		FVector Start = GetCharacterOwner()->GetCapsuleComponent()->GetComponentLocation() -
 			FVector(0.0f, 0.0f, GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
 		float FloorSweepTraceDist = MaxStepHeight / 2.0f + MAX_FLOOR_DIST + KINDA_SMALL_NUMBER;
 		FVector End = Start - FVector(0.0f, 0.0f, FloorSweepTraceDist);
@@ -520,7 +520,7 @@ bool UPBPlayerMovement::StepUp(const FVector& GravDir, const FVector& Delta, con
 
 	const FVector OldLocation = UpdatedComponent->GetComponentLocation();
 	float PawnRadius, PawnHalfHeight;
-	CharacterOwner->GetMesh()->GetScaledCapsuleSize(PawnRadius, PawnHalfHeight);
+	CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleSize(PawnRadius, PawnHalfHeight);
 
 	// Don't bother stepping up if top of capsule is hitting something.
 	const float InitialImpactZ = InHit.ImpactPoint.Z;
@@ -785,60 +785,16 @@ void UPBPlayerMovement::OnMovementModeChanged(EMovementMode PreviousMovementMode
 	{
 		// Hit = UPBUtil::TraceLineFullCharacter(CharacterOwner->GetCapsuleComponent(), GetWorld(), CharacterOwner);
 		FCollisionQueryParams TraceParams(FName(TEXT("RV_Trace")), true, CharacterOwner);
-		TraceParams.bTraceComplex = CharacterOwner->GetMesh()->bTraceComplexOnMove;
+		TraceParams.bTraceComplex = CharacterOwner->GetCapsuleComponent()->bTraceComplexOnMove;
 		TraceParams.bReturnPhysicalMaterial = true;
 
-		GetWorld()->SweepSingleByChannel(Hit, CharacterOwner->GetMesh()->GetComponentLocation(),
+		GetWorld()->SweepSingleByChannel(Hit, CharacterOwner->GetCapsuleComponent()->GetComponentLocation(),
 			CharacterOwner->GetCapsuleComponent()->GetComponentLocation() - FVector(0.0f, 0.0f, CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 2.0f),
 			FQuat::Identity, ECC_Visibility,
 			FCollisionShape::MakeBox(FVector(CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius(), CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius(),
 				CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 1.5f)),
 			TraceParams);
 		bJumped = true;
-	}
-	if (PreviousMovementMode == EMovementMode::MOVE_Falling && MovementMode == EMovementMode::MOVE_Walking)
-	{
-		Hit = CurrentFloor.HitResult;
-	}
-
-	UPBMoveStepSound* MoveSound = nullptr;
-	TSubclassOf<UPBMoveStepSound>* GotSound = nullptr;
-	if (Hit.PhysMaterial.IsValid())
-	{
-		GotSound = PBCharacter->GetMoveStepSound(Hit.PhysMaterial->SurfaceType);
-	}
-	if (GotSound)
-	{
-		MoveSound = GotSound->GetDefaultObject();
-	}
-	if (!MoveSound)
-	{
-		if (!PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default)))
-		{
-			return;
-		}
-		MoveSound = PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default))->GetDefaultObject();
-	}
-
-	if (MoveSound)
-	{
-		float MoveSoundVolume = MoveSound->GetWalkVolume();
-
-		TArray<USoundCue*> MoveSoundCues = bJumped ? MoveSound->GetJumpSounds() : MoveSound->GetLandSounds();
-
-		if (MoveSoundCues.Num() < 1)
-		{
-			return;
-		}
-
-		USoundCue* Sound = MoveSoundCues[FMath::RandRange(0, MoveSoundCues.Num() - 1)];
-
-		Sound->VolumeMultiplier = MoveSoundVolume;
-
-		/*UPBGameplayStatics::PlaySound(Sound, GetCharacterOwner(),
-									  // FVector(0.0f, 0.0f, -GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()),
-									  EPBSoundCategory::Footstep);*/
-		UGameplayStatics::SpawnSoundAttached(Sound, GetCharacterOwner()->GetRootComponent());
 	}
 }
 
@@ -926,7 +882,7 @@ void UPBPlayerMovement::PreemptCollision(float DeltaTime, float SurfaceFriction)
 	if (!IsMovingOnGround())
 	{
 		FHitResult HitResult;
-		FVector Start = GetCharacterOwner()->GetMesh()->GetComponentLocation() -
+		FVector Start = GetCharacterOwner()->GetCapsuleComponent()->GetComponentLocation() -
 			FVector(0.0f, 0.0f, GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
 		float FloorSweepTraceDist = MaxStepHeight + MAX_FLOOR_DIST + KINDA_SMALL_NUMBER;
 		FVector End = Start - FVector(0.0f, 0.0f, FloorSweepTraceDist);
@@ -937,7 +893,7 @@ void UPBPlayerMovement::PreemptCollision(float DeltaTime, float SurfaceFriction)
 			FVector MovementVector(Velocity.X, Velocity.Y, Velocity.Z);
 			// vf = vi + at
 			MovementVector.Z +=
-				(GetCharacterOwner()->GetMesh()->GetPhysicsLinearVelocity().Z + GetGravityZ() * DeltaTime * (1.0f - HitResult.ImpactNormal.Z));
+				(GetCharacterOwner()->GetCapsuleComponent()->GetPhysicsLinearVelocity().Z + GetGravityZ() * DeltaTime * (1.0f - HitResult.ImpactNormal.Z));
 			float FrictionMult = FMath::Min(0.0f, -2.0f + SurfaceFriction);
 			FVector CollisionVec = HitResult.ImpactNormal;
 			CollisionVec *= FrictionMult;
