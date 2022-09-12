@@ -3,10 +3,20 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
 #include "GameFramework/CharacterMovementComponent.h"
+
+#include "Runtime/Launch/Resources/Version.h"
+
 #include "PBPlayerMovement.generated.h"
 
 #define LADDER_MOUNT_TIMEOUT 0.2f
+
+// Crouch Timings (in seconds)
+#define MOVEMENT_DEFAULT_CROUCHTIME 0.4f
+#define MOVEMENT_DEFAULT_CROUCHJUMPTIME 0.0f
+#define MOVEMENT_DEFAULT_UNCROUCHTIME 0.2f
+#define MOVEMENT_DEFAULT_UNCROUCHJUMPTIME 0.8f
 
 // Testing mid-air stepping code
 #ifndef MID_AIR_STEP
@@ -55,12 +65,6 @@ protected:
 	/** If the player has already landed for a frame, and breaking may be applied. */
 	bool bBrakingFrameTolerated;
 
-	/** If in the crouching and sprint transition */
-	bool bIsSprinting;
-
-	/** floor check removed */
-	bool UseFlatBaseForFloorChecks = false;
-
 
 	/** The PB player character */
 	class APBPlayerCharacter* PBCharacter;
@@ -85,7 +89,9 @@ protected:
 	UPROPERTY(Category = "Character Movement: Walking", EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", UIMin = "0"))
 	float SpeedMultMax;
 
-	bool bAppliedFriction;
+	/** Fraction of uncrouch half-height to check for before doing starting an uncrouch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Character Movement (General Settings)")
+	float GroundUncrouchCheckFactor = 0.75f;
 
 public:
 	/** Print pos and vel (Source: cl_showpos) */
@@ -102,6 +108,7 @@ public:
 	void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void CalcVelocity(float DeltaTime, float Friction, bool bFluid, float BrakingDeceleration) override;
 	virtual void ApplyVelocityBraking(float DeltaTime, float Friction, float BrakingDeceleration) override;
+
 
 	// Noclip overrides
 	virtual bool DoJump(bool bClientSimulation) override;
@@ -136,9 +143,13 @@ public:
 		return bBrakingFrameTolerated;
 	}
 
+
+
 private:
 	/** Plays sound effect according to movement and surface */
 	void PlayMoveSound(float DeltaTime);
+
+	float DefaultStepHeight;
 
 #if WIP_SURFING
 	void PreemptCollision(float DeltaTime, float SurfaceFriction);

@@ -1,6 +1,7 @@
 // Copyright 2017-2019 Project Borealis
 
 #include "Character/PBPlayerMovement.h"
+
 #include "Components/CapsuleComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
@@ -9,8 +10,10 @@
 #include "Kismet/GameplayStatics.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Sound/SoundCue.h"
+
 #include "Sound/PBMoveStepSound.h"
 #include "Character/PBPlayerCharacter.h"
+
 static TAutoConsoleVariable<int32> CVarShowPos(TEXT("cl.ShowPos"), 0, TEXT("Show position and movement information.\n"), ECVF_Default);
 
 DECLARE_CYCLE_STAT(TEXT("Char StepUp"), STAT_CharStepUp, STATGROUP_Character);
@@ -22,8 +25,6 @@ const float VERTICAL_SLOPE_NORMAL_Z = 0.001f; // Slope is vertical if Abs(Normal
 											  // normals slightly off horizontal for vertical surface.
 
 // Purpose: override default player movement
-
-
 UPBPlayerMovement::UPBPlayerMovement()
 {
 	// We have our own air movement handling, so we can allow for full air
@@ -51,6 +52,11 @@ UPBPlayerMovement::UPBPlayerMovement()
 	bUseSeparateBrakingFriction = false;
 	// No multiplier
 	BrakingFrictionFactor = 1.0f;
+	// Historical value for Source
+	BrakingSubStepTime = 0.015f;
+	// Avoid breaking up time step
+	MaxSimulationTimeStep = 0.5f;
+	MaxSimulationIterations = 1;
 	// Braking deceleration (sv_stopspeed)
 	FallingLateralFriction = 0.0f;
 	BrakingDecelerationFalling = 0.0f;
@@ -59,6 +65,7 @@ UPBPlayerMovement::UPBPlayerMovement()
 	BrakingDecelerationWalking = 190.5f;
 	// HL2 step height
 	MaxStepHeight = 34.29f;
+	DefaultStepHeight = MaxStepHeight;
 	// Step height scaling due to speed
 	MinStepHeight = 7.5f;
 	// Jump z from HL2's 160Hu
@@ -106,24 +113,10 @@ UPBPlayerMovement::UPBPlayerMovement()
 	// Agent props
 	NavAgentProps.bCanFly = true;
 	PBCharacter = Cast<APBPlayerCharacter>(GetOwner());
-	//Crouching
-	NavAgentProps.bCanCrouch = true;
 }
 
 void UPBPlayerMovement::TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
-{
-	bAppliedFriction = false;
-
-	// TODO(mastercoms): HACK: double friction in order to account for insufficient braking on substepping
-	if (DeltaTime > MaxSimulationTimeStep)
-	{
-		BrakingFrictionFactor = 2.0f;
-	}
-	else
-	{
-		BrakingFrictionFactor = 1.0f;
-	}
-
+{	
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	// Skip player movement when we're simulating physics (ie ragdoll)
@@ -135,22 +128,20 @@ void UPBPlayerMovement::TickComponent(float DeltaTime, enum ELevelTick TickType,
 	if ((bShowPos || CVarShowPos->GetInt() != 0) && CharacterOwner)
 	{
 		GEngine->AddOnScreenDebugMessage(1, 1.0f, FColor::Green,
-			FString::Printf(TEXT("pos: %f %f %f"), CharacterOwner->GetActorLocation().X, CharacterOwner->GetActorLocation().Y,
-				CharacterOwner->GetActorLocation().Z));
+										 FString::Printf(TEXT("pos: %f %f %f"), CharacterOwner->GetActorLocation().X, CharacterOwner->GetActorLocation().Y,
+														 CharacterOwner->GetActorLocation().Z));
 		GEngine->AddOnScreenDebugMessage(2, 1.0f, FColor::Green,
-			FString::Printf(TEXT("ang: %f %f %f"), CharacterOwner->GetControlRotation().Yaw,
-				CharacterOwner->GetControlRotation().Pitch, CharacterOwner->GetControlRotation().Roll));
+										 FString::Printf(TEXT("ang: %f %f %f"), CharacterOwner->GetControlRotation().Yaw,
+														 CharacterOwner->GetControlRotation().Pitch, CharacterOwner->GetControlRotation().Roll));
 		GEngine->AddOnScreenDebugMessage(3, 1.0f, FColor::Green, FString::Printf(TEXT("vel: %f"), FMath::Sqrt(Velocity.X * Velocity.X + Velocity.Y * Velocity.Y)));
 	}
-
-
 
 	bBrakingFrameTolerated = IsMovingOnGround();
 }
 
 bool UPBPlayerMovement::DoJump(bool bClientSimulation)
 {
-	return bCheatFlying || Super::DoJump(bClientSimulation);
+	return !bCheatFlying && Super::DoJump(bClientSimulation);
 }
 
 #if MID_AIR_STEP
@@ -409,7 +400,7 @@ void UPBPlayerMovement::PhysFalling(float deltaTime, int32 Iterations)
 
 						// bDitch=true means that pawn is straddling two slopes, neither of which he can stand on
 						bool bDitch = ((OldHitImpactNormal.Z > 0.f) && (Hit.ImpactNormal.Z > 0.f) && (FMath::Abs(Delta.Z) <= KINDA_SMALL_NUMBER) &&
-							((Hit.ImpactNormal | OldHitImpactNormal) < 0.f));
+									   ((Hit.ImpactNormal | OldHitImpactNormal) < 0.f));
 						SafeMoveUpdatedComponent(Delta, PawnRotation, true, Hit);
 						if (Hit.Time == 0.f)
 						{
@@ -467,11 +458,11 @@ bool UPBPlayerMovement::CanStepUp(const FHitResult& Hit) const
 	{
 		FHitResult HitResult = FHitResult(ForceInit);
 		FVector Start = GetCharacterOwner()->GetCapsuleComponent()->GetComponentLocation() -
-			FVector(0.0f, 0.0f, GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+						FVector(0.0f, 0.0f, GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
 		float FloorSweepTraceDist = MaxStepHeight / 2.0f + MAX_FLOOR_DIST + KINDA_SMALL_NUMBER;
 		FVector End = Start - FVector(0.0f, 0.0f, FloorSweepTraceDist);
 		GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECollisionChannel::ECC_WorldStatic,
-			FCollisionQueryParams(FName(TEXT("FallingStepTrace")), true, GetCharacterOwner()));
+											 FCollisionQueryParams(FName(TEXT("FallingStepTrace")), true, GetCharacterOwner()));
 		if (!HitResult.bBlockingHit)
 		{
 			return false;
@@ -729,14 +720,25 @@ bool UPBPlayerMovement::StepUp(const FVector& GravDir, const FVector& Delta, con
 }
 #endif
 
-void UPBPlayerMovement::TwoWallAdjust(FVector& OutDelta, const FHitResult& Hit, const FVector& OldHitNormal) const
+void UPBPlayerMovement::TwoWallAdjust(FVector& Delta, const FHitResult& Hit, const FVector& OldHitNormal) const
 {
-	Super::Super::TwoWallAdjust(OutDelta, Hit, OldHitNormal);
+	UMovementComponent::TwoWallAdjust(Delta, Hit, OldHitNormal);
+	if (IsMovingOnGround())
+	{
+		if (Delta.Z < 0.f)
+		{
+			// Don't push down into the floor.
+			if (CurrentFloor.FloorDist < MIN_FLOOR_DIST && CurrentFloor.bBlockingHit)
+			{
+				Delta.Z = 0.f;
+			}
+		}
+	}
 }
 
 float UPBPlayerMovement::SlideAlongSurface(const FVector& Delta, float Time, const FVector& Normal, FHitResult& Hit, bool bHandleImpact)
 {
-	return Super::Super::SlideAlongSurface(Delta, Time, Normal, Hit, bHandleImpact);
+	return UMovementComponent::SlideAlongSurface(Delta, Time, Normal, Hit, bHandleImpact);
 }
 
 FVector UPBPlayerMovement::HandleSlopeBoosting(const FVector& SlideResult, const FVector& Delta, const float Time, const FVector& Normal, const FHitResult& Hit) const
@@ -776,7 +778,7 @@ void UPBPlayerMovement::OnMovementModeChanged(EMovementMode PreviousMovementMode
 	Super::OnMovementModeChanged(PreviousMovementMode, PreviousCustomMode);
 	// Reset step side if we are changing modes
 	StepSide = false;
-
+	
 	FHitResult Hit;
 	// did we jump or land
 	bool bJumped = false;
@@ -789,13 +791,37 @@ void UPBPlayerMovement::OnMovementModeChanged(EMovementMode PreviousMovementMode
 		TraceParams.bReturnPhysicalMaterial = true;
 
 		GetWorld()->SweepSingleByChannel(Hit, CharacterOwner->GetCapsuleComponent()->GetComponentLocation(),
-			CharacterOwner->GetCapsuleComponent()->GetComponentLocation() - FVector(0.0f, 0.0f, CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 2.0f),
-			FQuat::Identity, ECC_Visibility,
-			FCollisionShape::MakeBox(FVector(CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius(), CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius(),
-				CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 1.5f)),
-			TraceParams);
+									  CharacterOwner->GetCapsuleComponent()->GetComponentLocation() - FVector(0.0f, 0.0f, CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 2.0f),
+									  FQuat::Identity, ECC_Visibility,
+									  FCollisionShape::MakeBox(FVector(CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius(), CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleRadius(),
+																	   CharacterOwner->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 1.5f)),
+									  TraceParams);
 		bJumped = true;
 	}
+	if (PreviousMovementMode == EMovementMode::MOVE_Falling && MovementMode == EMovementMode::MOVE_Walking)
+	{
+		Hit = CurrentFloor.HitResult;
+	}
+
+	UPBMoveStepSound* MoveSound = nullptr;
+	TSubclassOf<UPBMoveStepSound>* GotSound = nullptr;
+	if (Hit.PhysMaterial.IsValid())
+	{
+		GotSound = PBCharacter->GetMoveStepSound(Hit.PhysMaterial->SurfaceType);
+	}
+	if (GotSound)
+	{
+		MoveSound = GotSound->GetDefaultObject();
+	}
+	if (!MoveSound)
+	{
+		if (!PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default)))
+		{
+			return;
+		}
+		MoveSound = PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default))->GetDefaultObject();
+	}
+
 }
 
 void UPBPlayerMovement::ToggleNoClip()
@@ -816,15 +842,19 @@ void UPBPlayerMovement::ToggleNoClip()
 
 void UPBPlayerMovement::ApplyVelocityBraking(float DeltaTime, float Friction, float BrakingDeceleration)
 {
-	float Speed = Velocity.Size2D();
-	if (Speed <= 0.1f || !HasValidData() || HasAnimRootMotion() || DeltaTime < MIN_TICK_TIME)
+	// UE4-COPY: void UCharacterMovementComponent::ApplyVelocityBraking(float DeltaTime, float Friction, float BrakingDeceleration)
+	if (Velocity.IsNearlyZero(0.1f) || !HasValidData() || HasAnimRootMotion() || DeltaTime < MIN_TICK_TIME)
 	{
 		return;
 	}
 
+	const float Speed = Velocity.Size2D();
+
 	const float FrictionFactor = FMath::Max(0.0f, BrakingFrictionFactor);
 	Friction = FMath::Max(0.0f, Friction * FrictionFactor);
-	BrakingDeceleration = FMath::Max(BrakingDeceleration, Speed);
+	{
+		BrakingDeceleration = FMath::Max(BrakingDeceleration, Speed);
+	}
 	BrakingDeceleration = FMath::Max(0.0f, BrakingDeceleration);
 	const bool bZeroFriction = FMath::IsNearlyZero(Friction);
 	const bool bZeroBraking = BrakingDeceleration == 0.0f;
@@ -836,20 +866,31 @@ void UPBPlayerMovement::ApplyVelocityBraking(float DeltaTime, float Friction, fl
 
 	const FVector OldVel = Velocity;
 
-	// Decelerate to brake to a stop
-	const FVector RevAccel = Friction * BrakingDeceleration * Velocity.GetSafeNormal();
-	Velocity -= RevAccel * DeltaTime;
+	// subdivide braking to get reasonably consistent results at lower frame rates
+	// (important for packet loss situations w/ networking)
+	float RemainingTime = DeltaTime;
+	const float MaxTimeStep = FMath::Clamp(BrakingSubStepTime, 1.0f / 75.0f, 1.0f / 20.0f);
 
-	// Don't reverse direction
-	if ((Velocity | OldVel) <= 0.0f)
+	// Decelerate to brake to a stop
+	const FVector RevAccel = -Velocity.GetSafeNormal();
+	while (RemainingTime >= MIN_TICK_TIME)
 	{
-		Velocity = FVector::ZeroVector;
-		return;
+		const float Delta = (RemainingTime > MaxTimeStep ? FMath::Min(MaxTimeStep, RemainingTime * 0.5f) : RemainingTime);
+		RemainingTime -= Delta;
+
+		// apply friction and braking
+		Velocity += (Friction * BrakingDeceleration * RevAccel) * Delta;
+
+		// Don't reverse direction
+		if ((Velocity | OldVel) <= 0.0f)
+		{
+			Velocity = FVector::ZeroVector;
+			return;
+		}
 	}
 
-	// Clamp to zero if nearly zero, or if below min threshold and braking.
-	const float VSizeSq = Velocity.SizeSquared();
-	if (VSizeSq <= KINDA_SMALL_NUMBER)
+	// Clamp to zero if nearly zero
+	if (Velocity.IsNearlyZero(KINDA_SMALL_NUMBER))
 	{
 		Velocity = FVector::ZeroVector;
 	}
@@ -868,6 +909,84 @@ void UPBPlayerMovement::PlayMoveSound(float DeltaTime)
 	{
 		return;
 	}
+
+	float Speed = Velocity.SizeSquared();
+	float RunSpeedThreshold;
+	float SprintSpeedThreshold;
+
+	{
+		RunSpeedThreshold = MaxWalkSpeed;
+		SprintSpeedThreshold = SprintSpeed;
+	}
+
+	// Only play sounds if we are moving fast enough on the ground or on a
+	// ladder
+	bool bPlaySound = (bBrakingFrameTolerated || bOnLadder) && Speed >= RunSpeedThreshold * RunSpeedThreshold;
+
+	if (!bPlaySound)
+	{
+		return;
+	}
+
+	bool bSprinting = Speed >= SprintSpeedThreshold * SprintSpeedThreshold;
+
+	float MoveSoundVolume = 1.0f;
+
+	UPBMoveStepSound* MoveSound = nullptr;
+
+	if (bOnLadder)
+	{
+		MoveSoundVolume = 0.5f;
+		MoveSoundTime = 450.0f;
+		if (!PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType1)))
+		{
+			return;
+		}
+		MoveSound = PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType1))->GetDefaultObject();
+	}
+	else
+	{
+		MoveSoundTime = bSprinting ? 300.0f : 400.0f;
+		FHitResult Hit = CurrentFloor.HitResult;
+		TSubclassOf<UPBMoveStepSound>* GotSound = nullptr;
+		if (Hit.PhysMaterial.IsValid())
+		{
+			GotSound = PBCharacter->GetMoveStepSound(Hit.PhysMaterial->SurfaceType);
+		}
+		if (GotSound)
+		{
+			MoveSound = GotSound->GetDefaultObject();
+		}
+		if (!MoveSound)
+		{
+			if (!PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default)))
+			{
+				return;
+			}
+			MoveSound = PBCharacter->GetMoveStepSound(TEnumAsByte<EPhysicalSurface>(EPhysicalSurface::SurfaceType_Default))->GetDefaultObject();
+		}
+	}
+
+	if (MoveSound)
+	{
+		TArray<USoundCue*> MoveSoundCues = StepSide ? MoveSound->GetStepLeftSounds() : MoveSound->GetStepRightSounds();
+
+		if (MoveSoundCues.Num() < 1)
+		{
+			return;
+		}
+
+		USoundCue* Sound = MoveSoundCues[FMath::RandRange(0, MoveSoundCues.Num() - 1)];
+
+		Sound->VolumeMultiplier = MoveSoundVolume;
+
+		/*UPBGameplayStatics::PlaySound(Sound, GetCharacterOwner(),
+									  // FVector(0.0f, 0.0f, -GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight()),
+									  EPBSoundCategory::Footstep);*/
+		UGameplayStatics::SpawnSoundAttached(Sound, GetCharacterOwner()->GetRootComponent());
+	}
+
+	StepSide = !StepSide;
 }
 
 #if WIP_SURFING
@@ -883,11 +1002,11 @@ void UPBPlayerMovement::PreemptCollision(float DeltaTime, float SurfaceFriction)
 	{
 		FHitResult HitResult;
 		FVector Start = GetCharacterOwner()->GetCapsuleComponent()->GetComponentLocation() -
-			FVector(0.0f, 0.0f, GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+						FVector(0.0f, 0.0f, GetCharacterOwner()->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
 		float FloorSweepTraceDist = MaxStepHeight + MAX_FLOOR_DIST + KINDA_SMALL_NUMBER;
 		FVector End = Start - FVector(0.0f, 0.0f, FloorSweepTraceDist);
 		GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, UpdatedComponent->GetCollisionObjectType(),
-			FCollisionQueryParams(FName(TEXT("SurfTrace")), true, GetCharacterOwner()));
+											 FCollisionQueryParams(FName(TEXT("SurfTrace")), true, GetCharacterOwner()));
 		if (HitResult.bBlockingHit && HitResult.ImpactNormal.Z < GetWalkableFloorZ())
 		{
 			FVector MovementVector(Velocity.X, Velocity.Y, Velocity.Z);
@@ -927,6 +1046,8 @@ void UPBPlayerMovement::CalcVelocity(float DeltaTime, float Friction, bool bFlui
 	const float MaxAccel = GetMaxAcceleration();
 	float MaxSpeed = GetMaxSpeed();
 
+	// Player doesn't path follow
+#if 0
 	// Check if path following requested movement
 	bool bZeroRequestedAcceleration = true;
 	FVector RequestedAcceleration = FVector::ZeroVector;
@@ -936,6 +1057,7 @@ void UPBPlayerMovement::CalcVelocity(float DeltaTime, float Friction, bool bFlui
 		RequestedAcceleration = RequestedAcceleration.GetClampedToMaxSize(MaxAccel);
 		bZeroRequestedAcceleration = false;
 	}
+#endif
 
 	if (bForceMaxAccel)
 	{
@@ -953,10 +1075,14 @@ void UPBPlayerMovement::CalcVelocity(float DeltaTime, float Friction, bool bFlui
 		AnalogInputModifier = 1.0f;
 	}
 
+#if 0
 	// Path following above didn't care about the analog modifier, but we do for everything else below, so get the fully modified value.
 	// Use max of requested speed and max speed if we modified the speed in ApplyRequestedMove above.
 	const float MaxInputSpeed = FMath::Max(MaxSpeed * AnalogInputModifier, GetMinAnalogSpeed());
 	MaxSpeed = FMath::Max(RequestedSpeed, MaxInputSpeed);
+#else
+	MaxSpeed = FMath::Max(MaxSpeed * AnalogInputModifier, GetMinAnalogSpeed());
+#endif
 
 	// Apply braking or deceleration
 	const bool bZeroAcceleration = Acceleration.IsNearlyZero();
@@ -970,12 +1096,19 @@ void UPBPlayerMovement::CalcVelocity(float DeltaTime, float Friction, bool bFlui
 	}
 
 	// Apply friction
-	// TODO: HACK: friction applied only once in substepping due to excessive friction, but this is too little for low frame rates
-	if (bIsGroundMove && !bAppliedFriction)
+	if (bIsGroundMove)
 	{
+		const bool bVelocityOverMax = IsExceedingMaxSpeed(MaxSpeed);
+		const FVector OldVelocity = Velocity;
+
 		const float ActualBrakingFriction = (bUseSeparateBrakingFriction ? BrakingFriction : Friction) * SurfaceFriction;
 		ApplyVelocityBraking(DeltaTime, ActualBrakingFriction, BrakingDeceleration);
-		bAppliedFriction = true;
+
+		// Don't allow braking to lower us below max speed if we started above it.
+		if (bVelocityOverMax && Velocity.SizeSquared() < FMath::Square(MaxSpeed) && FVector::DotProduct(Acceleration, OldVelocity) > 0.0f)
+		{
+			Velocity = OldVelocity.GetSafeNormal() * MaxSpeed;
+		}
 	}
 
 	// Apply fluid friction
@@ -1026,11 +1159,14 @@ void UPBPlayerMovement::CalcVelocity(float DeltaTime, float Friction, bool bFlui
 			}
 		}
 
+		// No requested accel on player
+#if 0
 		// Apply additional requested acceleration
 		if (!bZeroRequestedAcceleration)
 		{
 			Velocity += RequestedAcceleration * DeltaTime;
 		}
+#endif
 
 		// TODO: Surfing
 #if WIP_SURFING
@@ -1039,11 +1175,30 @@ void UPBPlayerMovement::CalcVelocity(float DeltaTime, float Friction, bool bFlui
 
 		Velocity = Velocity.GetClampedToMaxSize2D(13470.4f);
 
-		float SpeedSq = Velocity.SizeSquared2D();
 
 
+		MaxStepHeight = GetClass()->GetDefaultObject<UPBPlayerMovement>()->MaxStepHeight;
+		SetWalkableFloorZ(GetClass()->GetDefaultObject<UPBPlayerMovement>()->GetWalkableFloorZ());
 	}
 
+	{
+		// Scale step/ramp height down the faster we go
+		float SpeedSq = Velocity.SizeSquared2D();
+		float Speed = FMath::Sqrt(SpeedSq);
+		float SpeedScale = (Speed - SpeedMultMin) / (SpeedMultMax - SpeedMultMin);
+		// float SpeedMultiplier = UPBUtil::Clamp01(SpeedScale);
+		float SpeedMultiplier = FMath::Clamp(SpeedScale, 0.0f, 1.0f);
+		SpeedMultiplier *= SpeedMultiplier;
+		if (!IsFalling())
+		{
+			// If we're on ground, factor in friction.
+			SpeedMultiplier = FMath::Max((1.0f - SurfaceFriction) * SpeedMultiplier, 0.0f);
+		}
+		MaxStepHeight = FMath::Clamp(GetClass()->GetDefaultObject<UPBPlayerMovement>()->MaxStepHeight * (1.0f - SpeedMultiplier), MinStepHeight,
+			GetClass()->GetDefaultObject<UPBPlayerMovement>()->MaxStepHeight);
+		SetWalkableFloorZ(FMath::Clamp(GetClass()->GetDefaultObject<UPBPlayerMovement>()->GetWalkableFloorZ() - (0.5f * (0.4f - SpeedMultiplier)),
+			GetClass()->GetDefaultObject<UPBPlayerMovement>()->GetWalkableFloorZ(), 0.9848f));
+	}
 	if (bUseRVOAvoidance)
 	{
 		CalcAvoidanceVelocity(DeltaTime);

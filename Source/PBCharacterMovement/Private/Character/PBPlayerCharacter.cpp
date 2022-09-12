@@ -1,26 +1,11 @@
 // Copyright 2017-2019 Project Borealis
 
 #include "Character/PBPlayerCharacter.h"
+
 #include "Components/CapsuleComponent.h"
 #include "HAL/IConsoleManager.h"
-#include "Character/PBPlayerMovement.h"
-#include "Net/UnrealNetwork.h"
-#include "DrawDebugHelpers.h"
-#include "Camera/CameraComponent.h"
-#include "Kismet/KismetMathLibrary.h"
-#include "Animation/AnimInstance.h"
-#include "Kismet/GameplayStatics.h"
-#include "Components/InputComponent.h"
-#include "Components/CapsuleComponent.h"
-#include "Camera/CameraComponent.h"
-#include "GameFramework/Controller.h"
-#include "GameFramework/GameUserSettings.h"
-#include "GameFramework/InputSettings.h"
-#include "GameFramework/SpringArmComponent.h"
-#include "Kismet/GameplayStatics.h"
 
-static FName NAME_PBCharacterCollisionProfile_Capsule(TEXT("PBPawnCapsule"));
-static FName NAME_PBCCharacterCollisionProfile_Mesh(TEXT("PBPawnMesh"));
+#include "Character/PBPlayerMovement.h"
 
 static TAutoConsoleVariable<int32> CVarAutoBHop(TEXT("move.Pogo"), 0, TEXT("If holding spacebar should make the player jump whenever possible.\n"), ECVF_Default);
 
@@ -28,46 +13,28 @@ static TAutoConsoleVariable<int32> CVarBunnyhop(TEXT("move.Bunnyhopping"), 0, TE
 
 // Sets default values
 APBPlayerCharacter::APBPlayerCharacter(const FObjectInitializer& ObjectInitializer)
-/* Override the movement class from the base class to our own to support multiple speeds (eg. sprinting) */
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UPBPlayerMovement>(ACharacter::CharacterMovementComponentName))
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	SpringArmComponent = CreateDefaultSubobject<USpringArmComponent>(FName("SpringArmComponent"));
-	SpringArmComponent->TargetArmLength = 0.0f;
-	SpringArmComponent->SetupAttachment(GetMesh());
-
-	CameraComponent = CreateDefaultSubobject<UCameraComponent>(FName("CameraComponent"));
-	CameraComponent->SetRelativeLocation(FVector(0.0f, 0.0f, 70.0f));
-	CameraComponent->bUsePawnControlRotation = true;
-	CameraComponent->SetupAttachment(SpringArmComponent);
-
-
-	FirstPersonArms = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonArms"));
-	FirstPersonArms->SetRelativeRotation(FRotator(0, -90, 0));
-	CameraComponent->SetupAttachment(CameraComponent);
-
-	// Other settings
+	// Set size for collision capsule
+	GetCapsuleComponent()->InitCapsuleSize(30.48f, 68.58f);
+	// Set collision settings. We are the invisible player with no 3rd person mesh.
+	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
 	GetCapsuleComponent()->bReturnMaterialOnMove = true;
 
-	BaseGroundFriction = 2.f;
-	CrouchingGroundFriction = 100.f;
+	// set our turn rates for input
+	BaseTurnRate = 45.0f;
+	BaseLookUpRate = 45.0f;
+
+	// Camera eye level
+	DefaultBaseEyeHeight = 53.34f;
+	BaseEyeHeight = DefaultBaseEyeHeight;
+	const float CrouchedHalfHeight = 68.58f / 2.0f;
+	CrouchedEyeHeight = 53.34f - CrouchedHalfHeight;
 
 	// get pointer to movement component
 	MovementPtr = Cast<UPBPlayerMovement>(ACharacter::GetMovementComponent());
-
-	// Don't rotate when the controller rotates. Let the controller only affect the camera.
-	bUseControllerRotationPitch = false;
-	bUseControllerRotationYaw = true;
-	bUseControllerRotationRoll = false;
-
-	// Configure character movement
-	GetCharacterMovement()->bOrientRotationToMovement = false; // Character moves in the direction of input...
-	GetCharacterMovement()->RotationRate = FRotator(0.f, 540.f, 0.f); // ...at this rotation rate
-
-	/*Net Settings*/
-//NetUpdateFrequency = 128.0f;
-//MinNetUpdateFrequency = 32.0f;
 }
 
 void APBPlayerCharacter::BeginPlay()
@@ -76,109 +43,7 @@ void APBPlayerCharacter::BeginPlay()
 	Super::BeginPlay();
 	// Max jump time to get to the top of the arc
 	MaxJumpTime = -4.0f * GetCharacterMovement()->JumpZVelocity / (3.0f * GetCharacterMovement()->GetGravityZ());
-
-	APlayerCameraManager* CameraManager = UGameplayStatics::GetPlayerCameraManager(this, 0);
-	if (CameraManager)
-	{
-		CameraManager->ViewPitchMin = Camera.MinPitch;
-		CameraManager->ViewPitchMax = Camera.MaxPitch;
-	}
-
-	// Initialization
-	OriginalCameraLocation = CameraComponent->GetRelativeLocation();
-	OriginalCapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-
-	// Footstep setup
-	LastLocation = GetActorLocation();
-	LastFootstepLocation = GetActorLocation();
-	TravelDistance = 0;
-
-
 }
-
-void APBPlayerCharacter::Tick(const float DeltaTime)
-{
-	Super::Tick(DeltaTime);
-}
-void APBPlayerCharacter::Move(FVector Direction, float Value)
-{
-	if (!FMath::IsNearlyZero(Value))
-	{
-		// add movement in that direction
-		AddMovementInput(Direction, Value);
-	}
-}
-void APBPlayerCharacter::MoveForward(const float AxisValue)
-{
-	if (Controller)
-	{
-		FRotator ForwardRotation = Controller->GetControlRotation();
-
-		// Limit pitch rotation
-		if (GetCharacterMovement()->IsMovingOnGround() || GetCharacterMovement()->IsFalling())
-			ForwardRotation.Pitch = 0.0f;
-
-		// Find out which way is forward
-		const FVector Direction = FRotationMatrix(ForwardRotation).GetScaledAxis(EAxis::X);
-
-		// Apply movement in the calculated direction
-		AddMovementInput(Direction, AxisValue);
-
-		}
-}
-
-void APBPlayerCharacter::MoveRight(const float AxisValue)
-{
-	if (Controller)
-	{
-		// Find out which way is right
-		const FRotator RightRotation = Controller->GetControlRotation();
-		const FVector Direction = FRotationMatrix(RightRotation).GetScaledAxis(EAxis::Y);
-
-		// Apply movement in the calculated direction
-		AddMovementInput(Direction, AxisValue);
-	}
-}
-
-void APBPlayerCharacter::AddControllerYawInput(const float Value)
-{
-	return Super::AddControllerYawInput(Value * Camera.SensitivityX * GetWorld()->GetDeltaSeconds());
-}
-
-void APBPlayerCharacter::AddControllerPitchInput(const float Value)
-{
-	Super::AddControllerPitchInput(Value * Camera.SensitivityY * GetWorld()->GetDeltaSeconds());
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 void APBPlayerCharacter::ClearJumpInput(float DeltaTime)
 {
@@ -316,7 +181,7 @@ bool APBPlayerCharacter::CanJumpInternal_Implementation() const
 			// C) The jump limit has been met AND we were already jumping
 			const bool bJumpKeyHeld = (bPressedJump && JumpKeyHoldTime < GetJumpMaxHoldTime());
 			bCanJump = bJumpKeyHeld &&
-				(GetCharacterMovement()->IsMovingOnGround() || (JumpCurrentCount < JumpMaxCount) || (bWasJumping && JumpCurrentCount == JumpMaxCount));
+					   (GetCharacterMovement()->IsMovingOnGround() || (JumpCurrentCount < JumpMaxCount) || (bWasJumping && JumpCurrentCount == JumpMaxCount));
 		}
 		if (GetCharacterMovement()->IsMovingOnGround())
 		{
@@ -327,6 +192,37 @@ bool APBPlayerCharacter::CanJumpInternal_Implementation() const
 	}
 
 	return bCanJump;
+}
+
+void APBPlayerCharacter::Move(FVector Direction, float Value)
+{
+	if (!FMath::IsNearlyZero(Value))
+	{
+		// add movement in that direction
+		AddMovementInput(Direction, Value);
+	}
+}
+
+void APBPlayerCharacter::Turn(bool bIsPure, float Rate)
+{
+	if (!bIsPure)
+	{
+		Rate = Rate * BaseTurnRate * GetWorld()->GetDeltaSeconds();
+	}
+
+	// calculate delta for this frame from the rate information
+	AddControllerYawInput(Rate);
+}
+
+void APBPlayerCharacter::LookUp(bool bIsPure, float Rate)
+{
+	if (!bIsPure)
+	{
+		Rate = Rate * BaseLookUpRate * GetWorld()->GetDeltaSeconds();
+	}
+
+	// calculate delta for this frame from the rate information
+	AddControllerPitchInput(Rate);
 }
 
 void APBPlayerCharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent const& DamageEvent, APawn* PawnInstigator, AActor* DamageCauser)
@@ -360,3 +256,22 @@ void APBPlayerCharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent con
 		GetCharacterMovement()->AddImpulse(Impulse, bMassIndependentImpulse);
 	}
 }
+
+void APBPlayerCharacter::RecalculateBaseEyeHeight() {}
+
+bool APBPlayerCharacter::CanCrouch() const
+{
+	return !GetCharacterMovement()->bCheatFlying && Super::CanCrouch();
+}
+
+#if ENGINE_MAJOR_VERSION == 4
+void APBPlayerCharacter::RecalculateCrouchedEyeHeight()
+{
+	if (GetCharacterMovement() != nullptr)
+	{
+		constexpr float EyeHeightRatio = 0.8f;	// how high the character's eyes are, relative to the crouched height
+
+		CrouchedEyeHeight = GetCharacterMovement()->GetCrouchedHalfHeight() * EyeHeightRatio;
+	}
+}
+#endif
