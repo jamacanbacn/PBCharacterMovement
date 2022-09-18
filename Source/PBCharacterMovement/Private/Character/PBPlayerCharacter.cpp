@@ -1,13 +1,22 @@
 // Copyright 2017-2019 Project Borealis
 
 #include "Character/PBPlayerCharacter.h"
-
 #include "Components/CapsuleComponent.h"
 #include "HAL/IConsoleManager.h"
-
+#include "Camera/CameraComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/TimelineComponent.h"
+#include "Engine/Engine.h"
+#include "GameFramework/Character.h"
+#include "GameFramework/CharacterMovementComponent.h"
+#include "GameFramework/InputSettings.h"
+#include "GameFramework/SpringArmComponent.h"
+#include "Kismet/GameplayStatics.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Character/PBPlayerMovement.h"
 
-static TAutoConsoleVariable<int32> CVarAutoBHop(TEXT("move.Pogo"), 1, TEXT("If holding spacebar should make the player jump whenever possible.\n"), ECVF_Default);
+static TAutoConsoleVariable<int32> CVarAutoBHop(TEXT("move.Pogo"), 0, TEXT("If holding spacebar should make the player jump whenever possible.\n"), ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarBunnyhop(TEXT("move.Bunnyhopping"), 0, TEXT("Enable normal bunnyhopping.\n"), ECVF_Default);
 
@@ -21,7 +30,6 @@ APBPlayerCharacter::APBPlayerCharacter(const FObjectInitializer& ObjectInitializ
 	GetCapsuleComponent()->InitCapsuleSize(30.48f, 68.58f);
 	// Set collision settings. We are the invisible player with no 3rd person mesh.
 	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Camera, ECR_Block);
-	GetCapsuleComponent()->bReturnMaterialOnMove = true;
 
 	// set our turn rates for input
 	BaseTurnRate = 45.0f;
@@ -33,8 +41,16 @@ APBPlayerCharacter::APBPlayerCharacter(const FObjectInitializer& ObjectInitializ
 	const float CrouchedHalfHeight = 68.58f / 2.0f;
 	CrouchedEyeHeight = 53.34f - CrouchedHalfHeight;
 
+	// Fall Damage Initializations
+	// PLAYER_MAX_SAFE_FALL_SPEED
+	MinSpeedForFallDamage = 1002.9825f;
+	// PLAYER_MIN_BOUNCE_SPEED
+	MinLandBounceSpeed = 329.565f;
+
 	// get pointer to movement component
 	MovementPtr = Cast<UPBPlayerMovement>(ACharacter::GetMovementComponent());
+
+	CapDamageMomentumZ = 476.25f;
 }
 
 void APBPlayerCharacter::BeginPlay()
@@ -45,14 +61,74 @@ void APBPlayerCharacter::BeginPlay()
 	MaxJumpTime = -4.0f * GetCharacterMovement()->JumpZVelocity / (3.0f * GetCharacterMovement()->GetGravityZ());
 }
 
+void APBPlayerCharacter::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+
+	if (bDeferJumpStop)
+	{
+		bDeferJumpStop = false;
+		Super::StopJumping();
+	}
+}
+
+void APBPlayerCharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent const& DamageEvent, APawn* PawnInstigator, AActor* DamageCauser)
+{
+	UDamageType const* const DmgTypeCDO = DamageEvent.DamageTypeClass->GetDefaultObject<UDamageType>();
+	if (GetCharacterMovement())
+	{
+		FVector ImpulseDir;
+
+		if (IsValid(DamageCauser))
+		{
+			ImpulseDir = (GetActorLocation() - DamageCauser->GetActorLocation()).GetSafeNormal();
+		}
+		else
+		{
+			FHitResult HitInfo;
+			DamageEvent.GetBestHitInfo(this, DamageCauser, HitInfo, ImpulseDir);
+		}
+
+		const float SizeFactor = (60.96f * 60.96f * 137.16f) / (FMath::Square(GetCapsuleComponent()->GetScaledCapsuleRadius() * 2.0f) * GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 2.0f);
+
+		float Magnitude = 1.905f * DamageTaken * SizeFactor * 5.0f;
+		Magnitude = FMath::Min(Magnitude, 1905.0f);
+
+		FVector Impulse = ImpulseDir * Magnitude;
+		bool const bMassIndependentImpulse = !DmgTypeCDO->bScaleMomentumByMass;
+		float MassScale = 1.f;
+		if (!bMassIndependentImpulse && GetCharacterMovement()->Mass > SMALL_NUMBER)
+		{
+			MassScale = 1.f / GetCharacterMovement()->Mass;
+		}
+		if (CapDamageMomentumZ > 0.f)
+		{
+			Impulse.Z = FMath::Min(Impulse.Z * MassScale, CapDamageMomentumZ) / MassScale;
+		}
+
+		GetCharacterMovement()->AddImpulse(Impulse, bMassIndependentImpulse);
+	}
+}
+
 void APBPlayerCharacter::ClearJumpInput(float DeltaTime)
 {
-	// Don't clear jump input right away if we're auto hopping or noclipping (holding to go up)
-	if (CVarAutoBHop->GetInt() != 0 || bAutoBunnyhop || GetCharacterMovement()->bCheatFlying)
+	// Don't clear jump input right away if we're auto hopping or noclipping (holding to go up), or if we are deferring a jump stop
+	if (CVarAutoBHop.GetValueOnGameThread() != 0 || bAutoBunnyhop || GetCharacterMovement()->bCheatFlying || bDeferJumpStop)
 	{
 		return;
 	}
 	Super::ClearJumpInput(DeltaTime);
+}
+
+void APBPlayerCharacter::Jump()
+{
+	if (GetCharacterMovement()->IsFalling())
+	{
+		bDeferJumpStop = true;
+	}
+
+	Super::Jump();
 }
 
 void APBPlayerCharacter::OnMovementModeChanged(EMovementMode PrevMovementMode, uint8 PrevCustomMode)
@@ -84,31 +160,28 @@ void APBPlayerCharacter::OnMovementModeChanged(EMovementMode PrevMovementMode, u
 
 void APBPlayerCharacter::StopJumping()
 {
-	Super::StopJumping();
-	if (GetCharacterMovement()->bCheatFlying)
+	if (!bDeferJumpStop)
 	{
-		Cast<UPBPlayerMovement>(GetMovementComponent())->NoClipVerticalMoveMode = 0;
+		Super::StopJumping();
 	}
 }
 
 void APBPlayerCharacter::OnJumped_Implementation()
 {
-	LastJumpTime = GetWorld()->GetTimeSeconds();
-	if (GetCharacterMovement()->bCheatFlying)
+	if (MovementPtr->IsOnLadder())
 	{
-		MovementPtr->NoClipVerticalMoveMode = 1;
+		return;
 	}
-	else if (GetWorld()->GetTimeSeconds() >= LastJumpBoostTime + MaxJumpTime)
+
+	if (GetWorld()->GetTimeSeconds() >= LastJumpBoostTime + MaxJumpTime)
 	{
 		LastJumpBoostTime = GetWorld()->GetTimeSeconds();
 		// Boost forward speed on jump
 		FVector Facing = GetActorForwardVector();
-		// Give it its backward/forward direction
-		float ForwardSpeed;
 		FVector Input = MovementPtr->GetLastInputVector().GetClampedToMaxSize2D(1.0f) * MovementPtr->GetMaxAcceleration();
-		ForwardSpeed = Input | Facing;
+		float ForwardSpeed = Input | Facing;
 		// Adjust how much the boost is
-		float SpeedBoostPerc = (bIsSprinting || bIsCrouched) ? 0.1f : 0.5f;
+		float SpeedBoostPerc = bIsSprinting || bIsCrouched ? 0.1f : 0.5f;
 		// How much we are boosting by
 		float SpeedAddition = FMath::Abs(ForwardSpeed * SpeedBoostPerc);
 		// We can only boost up to this much
@@ -133,7 +206,7 @@ void APBPlayerCharacter::OnJumped_Implementation()
 		// Boost our velocity
 		FVector JumpBoostedVel = GetMovementComponent()->Velocity + Facing * SpeedAddition;
 		float JumpBoostedSizeSq = JumpBoostedVel.SizeSquared2D();
-		if (CVarBunnyhop->GetInt() != 0)
+		if (CVarBunnyhop.GetValueOnGameThread() != 0)
 		{
 			FVector JumpBoostedUnclampVel = GetMovementComponent()->Velocity + Facing * SpeedAdditionNoClamp;
 			float JumpBoostedUnclampSizeSq = JumpBoostedUnclampVel.SizeSquared2D();
@@ -157,6 +230,8 @@ void APBPlayerCharacter::ToggleNoClip()
 
 bool APBPlayerCharacter::CanJumpInternal_Implementation() const
 {
+	// UE-COPY: ACharacter::CanJumpInternal_Implementation()
+
 	bool bCanJump = GetCharacterMovement() && GetCharacterMovement()->IsJumpAllowed();
 
 	if (bCanJump)
@@ -225,53 +300,33 @@ void APBPlayerCharacter::LookUp(bool bIsPure, float Rate)
 	AddControllerPitchInput(Rate);
 }
 
-void APBPlayerCharacter::ApplyDamageMomentum(float DamageTaken, FDamageEvent const& DamageEvent, APawn* PawnInstigator, AActor* DamageCauser)
+//void APBPlayerCharacter::RecalculateBaseEyeHeight()
+//{
+//	const ACharacter* DefaultCharacter = GetClass()->GetDefaultObject<ACharacter>();
+//	const float OldUnscaledHalfHeight = DefaultCharacter->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+//	const float CrouchedHalfHeight = GetCharacterMovement()->CrouchedHalfHeight;
+//	const float FullCrouchDiff = OldUnscaledHalfHeight - CrouchedHalfHeight;
+//	const UCapsuleComponent* CharacterCapsule = GetCapsuleComponent();
+//	const float CurrentUnscaledHalfHeight = CharacterCapsule->GetUnscaledCapsuleHalfHeight();
+//	const float CurrentAlpha = 1.0f - (CurrentUnscaledHalfHeight - CrouchedHalfHeight) / FullCrouchDiff;
+//	BaseEyeHeight = FMath::Lerp(DefaultCharacter->BaseEyeHeight, CrouchedEyeHeight, SimpleSpline(CurrentAlpha));
+//}
+
+//bool APBPlayerCharacter::CanCrouch() const
+//{
+	//return !GetCharacterMovement()->bCheatFlying && Super::CanCrouch() && !MovementPtr->IsOnLadder();
+//}
+
+void APBPlayerCharacter::OnStartCrouch(float HeightAdjust, float ScaledHeightAdjust)
 {
-	UDamageType const* const DmgTypeCDO = DamageEvent.DamageTypeClass->GetDefaultObject<UDamageType>();
-	if (GetCharacterMovement())
-	{
-		FHitResult HitInfo;
-		FVector ImpulseDir;
-		DamageEvent.GetBestHitInfo(this, DamageCauser, HitInfo, ImpulseDir);
+	Super::OnStartCrouch(HeightAdjust, ScaledHeightAdjust);
 
-		FVector Impulse = ImpulseDir;
-		float SizeFactor = (60.96f * 60.96f * 137.16f) /
-						   (FMath::Square(GetCapsuleComponent()->GetScaledCapsuleRadius() * 2.0f) * GetCapsuleComponent()->GetScaledCapsuleHalfHeight() * 2.0f);
-		Impulse *= DamageTaken * SizeFactor * 5.0f * 3.0f / 4.0f;
-		bool const bMassIndependentImpulse = !DmgTypeCDO->bScaleMomentumByMass;
-		FVector MassScaledImpulse = Impulse;
-		if (!bMassIndependentImpulse && GetCharacterMovement()->Mass > SMALL_NUMBER)
-		{
-			MassScaledImpulse = MassScaledImpulse / GetCharacterMovement()->Mass;
-		}
-		if (MassScaledImpulse.Z > 1238.25f)
-		{
-			Impulse.Z = 1238.25f;
-		}
-		if (MassScaledImpulse.SizeSquared2D() > 1714.5f * 1714.5f)
-		{
-			// Impulse = Impulse.GetClampedToMaxSize2D(1714.5f);
-		}
-
-		GetCharacterMovement()->AddImpulse(Impulse, bMassIndependentImpulse);
-	}
+	//CameraBoom->RelativeLocation.Z = HeightAdjust;
 }
 
-void APBPlayerCharacter::RecalculateBaseEyeHeight() {}
-
-bool APBPlayerCharacter::CanCrouch() const
+void APBPlayerCharacter::OnEndCrouch(float HeightAdjust, float ScaledHeightAdjust)
 {
-	return !GetCharacterMovement()->bCheatFlying && Super::CanCrouch();
-}
+	Super::OnEndCrouch(HeightAdjust, ScaledHeightAdjust);
 
-#if ENGINE_MAJOR_VERSION == 4
-void APBPlayerCharacter::RecalculateCrouchedEyeHeight()
-{
-	if (GetCharacterMovement() != nullptr)
-	{
-		constexpr float EyeHeightRatio = 0.8f;	// how high the character's eyes are, relative to the crouched height
-
-		CrouchedEyeHeight = GetCharacterMovement()->GetCrouchedHalfHeight() * EyeHeightRatio;
-	}
+	//CameraBoom->RelativeLocation.Z = 0.f;
 }
-#endif

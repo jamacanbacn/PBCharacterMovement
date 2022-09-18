@@ -14,23 +14,26 @@ class USoundCue;
 class UPBMoveStepSound;
 class UPBPlayerMovement;
 
+inline float SimpleSpline(float Value)
+{
+	const float ValueSquared = Value * Value;
+	return (3.0f * ValueSquared - 2.0f * ValueSquared * Value);
+}
+
 UCLASS(config = Game)
 class PBCHARACTERMOVEMENT_API APBPlayerCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
 public:
+	void Tick(float DeltaTime) override;
 	virtual void ClearJumpInput(float DeltaTime) override;
+	void Jump() override;
 	virtual void StopJumping() override;
 	virtual void OnJumped_Implementation() override;
 	virtual bool CanJumpInternal_Implementation() const override;
 
-	void RecalculateBaseEyeHeight() override;
-
-#if ENGINE_MAJOR_VERSION == 4
-	/** Calculates the crouched eye height based on movement component settings */
-	void RecalculateCrouchedEyeHeight();
-#endif
+	//void RecalculateBaseEyeHeight() override;
 
 	/* Triggered when player's movement mode has changed */
 	void OnMovementModeChanged(EMovementMode PrevMovementMode, uint8 PrevCustomMode) override;
@@ -78,6 +81,10 @@ private:
 	UPROPERTY(EditDefaultsOnly, meta = (AllowPrivateAccess = "true"), Category = "PB Player|Damage")
 	float MinSpeedForFallDamage;
 
+	// In HL2, the player has the Z component for applying momentum to the capsule capped
+	UPROPERTY(EditDefaultsOnly, meta = (AllowPrivateAccess = "true"), Category = "PB Player|Damage")
+	float CapDamageMomentumZ = 0.f;
+
 	/** Pointer to player movement component */
 	UPBPlayerMovement* MovementPtr;
 
@@ -86,13 +93,21 @@ private:
 
 	bool bWantsToWalk;
 
+	/** defer the jump stop for a frame (for early jumps) */
+	bool bDeferJumpStop;
+
 	virtual void ApplyDamageMomentum(float DamageTaken, FDamageEvent const& DamageEvent, APawn* PawnInstigator, AActor* DamageCauser) override;
 
 protected:
 	virtual void BeginPlay();
-
 public:
 	APBPlayerCharacter(const FObjectInitializer& ObjectInitializer);
+
+
+
+	void OnStartCrouch(float HeightAdjust, float ScaledHeightAdjust) override;
+
+	void OnEndCrouch(float HeightAdjust, float ScaledHeightAdjust) override;
 
 #pragma region Mutators
 	UFUNCTION()
@@ -170,5 +185,5 @@ public:
 	UFUNCTION()
 	void LookUp(bool bIsPure, float Rate);
 
-	virtual bool CanCrouch() const override;
+	//virtual bool CanCrouch() const override;
 };
