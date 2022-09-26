@@ -212,7 +212,6 @@ public:
 	//	return bInCrouch;
 	//}
 
-	virtual float GetMaxSpeed() const override;
 
 private:
 	/** Plays sound effect according to movement and surface */

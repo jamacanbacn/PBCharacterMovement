@@ -1696,25 +1696,3 @@ bool UPBPlayerMovement::CanAttemptJump() const
 	return bCanAttemptJump;
 }
 
-float UPBPlayerMovement::GetMaxSpeed() const
-{
-	if (bCheatFlying)
-	{
-		return (PBCharacter->IsSprinting() ? SprintSpeed : WalkSpeed) * 1.5f;
-	}
-	float Speed;
-	if (PBCharacter->IsSprinting())
-	{
-			Speed = SprintSpeed;
-	}
-	else if (PBCharacter->DoesWantToWalk())
-	{
-		Speed = WalkSpeed;
-	}
-	else
-	{
-		Speed = RunSpeed;
-	}
-
-	return Speed;
-}
